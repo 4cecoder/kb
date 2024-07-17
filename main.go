@@ -35,6 +35,15 @@ type Event struct {
 	Direction int
 }
 
+type OSType int
+
+const (
+	OSUnknown OSType = iota
+	OSWindows
+	OSMacOS
+	OSLinux
+)
+
 type SharerApp struct {
 	isServer     bool
 	serverAddr   string
@@ -55,6 +64,9 @@ type SharerApp struct {
 	running      bool
 	mutex        sync.Mutex
 	ipLabel      *widget.Label
+	activeScreen bool // true if this screen is active, false otherwise
+	localOS      OSType
+	remoteOS     OSType
 }
 
 func newSharerApp() *SharerApp {
@@ -229,13 +241,17 @@ func (sa *SharerApp) runServer() {
 	evChan := hook.Start()
 	defer hook.End()
 
+	sa.detectOS()
+	sa.sendOSInfo()
+	sa.receiveOSInfo()
+
 	for ev := range evChan {
 		var event Event
 		switch ev.Kind {
 		case hook.KeyDown:
-			event = Event{Type: KeyDown, Key: strconv.Itoa(int(ev.Rawcode))}
+			event = Event{Type: KeyDown, Key: sa.remapKey(strconv.Itoa(int(ev.Rawcode)))}
 		case hook.KeyUp:
-			event = Event{Type: KeyUp, Key: strconv.Itoa(int(ev.Rawcode))}
+			event = Event{Type: KeyUp, Key: sa.remapKey(strconv.Itoa(int(ev.Rawcode)))}
 		case hook.MouseMove:
 			x, y := robotgo.Location()
 			event = Event{Type: MouseMove, X: x, Y: y}
@@ -277,6 +293,10 @@ func (sa *SharerApp) runClient() {
 
 	sa.decoder = gob.NewDecoder(sa.conn)
 
+	sa.detectOS()
+	sa.sendOSInfo()
+	sa.receiveOSInfo()
+
 	for sa.running {
 		var event Event
 		err := sa.decoder.Decode(&event)
@@ -287,13 +307,23 @@ func (sa *SharerApp) runClient() {
 
 		switch event.Type {
 		case KeyDown:
-			robotgo.KeyDown(event.Key)
+			if sa.activeScreen {
+				robotgo.KeyDown(sa.remapKey(event.Key))
+			}
 		case KeyUp:
-			robotgo.KeyUp(event.Key)
+			if sa.activeScreen {
+				robotgo.KeyUp(sa.remapKey(event.Key))
+			}
 		case MouseMove:
 			x := int(float64(event.X) / 100 * float64(sa.screenWidth))
 			y := int(float64(event.Y) / 100 * float64(sa.screenHeight))
 			robotgo.Move(x, y)
+			// Update active screen based on mouse position
+			oldActiveScreen := sa.activeScreen
+			sa.activeScreen = x >= 0 && x < sa.screenWidth && y >= 0 && y < sa.screenHeight
+			if oldActiveScreen != sa.activeScreen {
+				sa.updateActiveScreenStatus()
+			}
 		case MouseDown:
 			robotgo.Click(event.Button)
 		case MouseUp:
@@ -302,6 +332,61 @@ func (sa *SharerApp) runClient() {
 			robotgo.Scroll(0, event.Direction)
 		}
 	}
+}
+
+func (sa *SharerApp) updateActiveScreenStatus() {
+	if sa.activeScreen {
+		sa.status.SetText("Active - Keyboard input enabled")
+	} else {
+		sa.status.SetText("Inactive - Keyboard input disabled")
+	}
+}
+
+func (sa *SharerApp) detectOS() {
+	// Implement OS detection logic here
+	// This is a simplified version, you'll need to implement the full logic
+	sa.localOS = OSUnknown
+	// Count USB setup packets and determine OS
+	// Set sa.localOS based on the detection result
+}
+
+func (sa *SharerApp) sendOSInfo() {
+	if sa.encoder != nil {
+		sa.encoder.Encode(sa.localOS)
+	}
+}
+
+func (sa *SharerApp) receiveOSInfo() {
+	if sa.decoder != nil {
+		sa.decoder.Decode(&sa.remoteOS)
+	}
+}
+
+func (sa *SharerApp) remapKey(key string) string {
+	if sa.localOS == OSMacOS && sa.remoteOS == OSWindows {
+		// Remap Mac keys to Windows keys
+		switch key {
+		case "58": // Left Command
+			return "91" // Left Windows key
+		case "61": // Right Command
+			return "92" // Right Windows key
+		case "56": // Left Alt
+			return "18" // Left Ctrl
+			// Add more key mappings as needed
+		}
+	} else if sa.localOS == OSWindows && sa.remoteOS == OSMacOS {
+		// Remap Windows keys to Mac keys
+		switch key {
+		case "91": // Left Windows key
+			return "58" // Left Command
+		case "92": // Right Windows key
+			return "61" // Right Command
+		case "17": // Left Ctrl
+			return "56" // Left Alt
+			// Add more key mappings as needed
+		}
+	}
+	return key
 }
 
 func main() {
